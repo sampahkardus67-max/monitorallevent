@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
 """
-JKT48 Ticket & Show Monitor with Telegram Interactive Commands
+JKT48 Ticket & Show Monitor with Telegram Interactive Commands & Member Query Filtering
 Monitors:
 1. Exclusives (PHOTOCARD, TWO_SHOT, DIGITAL_PHOTOBOOK) - Purchases & Restocks
 2. Shows (type=SHOW) - Available/Sold Ticket Count & Purchases
 
 Interactive Commands (only responds to configured CHAT_ID):
-- "vc" / "/vc": Returns Digital Photobook (video call) data report.
-- "show" / "/show": Returns theater show details and ticket availability.
+- "vc [query]" / "/vc [query]": Returns Digital Photobook (video call) data.
+- "pc [query]" / "/pc [query]" / "photocard [query]": Returns Photocard data.
+- "2s [query]" / "/2s [query]" / "2shot [query]": Returns Two Shot data.
+- "pb [query]" / "/pb [query]" / "photobook [query]": Returns Digital Photobook data.
+- "show [query]" / "/show [query]": Returns theater show details and ticket availability (filtered by show title/team).
 """
 
 import os
@@ -29,8 +32,8 @@ if sys.platform.startswith("win"):
 # Configurations from Environment Variables
 BOT_TOKEN      = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 CHAT_ID        = os.environ.get("TELEGRAM_CHAT_ID", "")
-INTERVAL       = int(os.environ.get("MONITOR_INTERVAL", "5"))
-HEARTBEAT_H    = int(os.environ.get("HEARTBEAT_HOURS", "6"))
+INTERVAL       = int(os.environ.get("MONITOR_INTERVAL", "30"))
+HEARTBEAT_H    = int(os.environ.get("HEBEAT_HOURS", "6"))
 MAX_FAIL       = 5
 WATCH_MEMBERS  = [] # Add member names here to filter exclusives if desired
 
@@ -43,6 +46,24 @@ HEADERS = {
     "Accept-Language": "id-ID,id;q=0.9",
     "Referer": "https://jkt48.com/",
     "Origin": "https://jkt48.com",
+}
+
+# Member Nicknames mapping to official JKT48 database names
+MEMBER_NICKNAMES = {
+    "nala": ["shabilqis naila"],
+    "levi": ["michelle levia"],
+    "freya": ["freya jayawardana"],
+    "fiony": ["fiony alveria"],
+    "gracia": ["shania gracia"],
+    "indah": ["indah cahya"],
+    "gracie": ["grace octaviani"],
+    "fritzy": ["fritzy rosmerian"],
+    "alya": ["alya amanda"],
+    "lana": ["aurhel alana"],
+    "aurhel": ["aurhel alana"],
+    "celline": ["celline thefani"],
+    "ralyne": ["ralyne van irwan"],
+    "michelle": ["michelle alexandra", "michelle levia"]
 }
 
 # Global cache variables shared between the monitor loop and the telegram responder thread
@@ -70,6 +91,32 @@ def parse_wib_datetime(date_str, time_str):
         time_part += ":00"
     dt = datetime.strptime(f"{only_date} {time_part}", "%Y-%m-%d %H:%M:%S")
     return dt.replace(tzinfo=timezone(timedelta(hours=7)))
+
+def format_date_str(date_str):
+    # date_str is e.g. "2026-06-28" or "2026-06-28T17:00:00.000Z"
+    only_date = date_str[:10]
+    try:
+        parts = only_date.split("-")
+        if len(parts) == 3:
+            return f"{parts[2]}-{parts[1]}-{parts[0]}"
+    except Exception:
+        pass
+    return only_date
+
+# Nickname matching logic
+def matches_member_query(member_name, query):
+    if not query:
+        return True
+    m_name_lower = member_name.lower()
+    q_lower = query.lower().strip()
+    
+    # Get mapped official names for nickname or default to searching query itself
+    targets = MEMBER_NICKNAMES.get(q_lower, [q_lower])
+        
+    for target in targets:
+        if target in m_name_lower:
+            return True
+    return False
 
 # Telegram Notifier
 def telegram(msg, target_chat_id=None):
@@ -269,29 +316,38 @@ def fetch_all_active_data(exclusives, shows):
     return exc_results, show_results
 
 # Interactive Telegram Commands Handlers
-def handle_vc_command(target_chat_id):
+def handle_exclusive_by_category(target_chat_id, category, query):
     global active_exclusives
     
     with cache_lock:
         excs = list(active_exclusives)
         
     if not excs:
-        # Try fetching if cache is empty
         excs = fetch_exclusives_list()
         
-    vc_excs = [e for e in excs if e.get("category") == "DIGITAL_PHOTOBOOK"]
+    filtered_excs = [e for e in excs if e.get("category") == category]
     
-    if not vc_excs:
-        telegram("ℹ️ <b>Tidak ada event Digital Photobook (video call) aktif saat ini.</b>", target_chat_id)
+    cat_label = {
+        "DIGITAL_PHOTOBOOK": "DIGITAL PHOTOBOOK (VIDEO CALL)",
+        "PHOTOCARD": "PHOTOCARD (MEET & GREET)",
+        "TWO_SHOT": "TWO SHOT (2S)"
+    }.get(category, category)
+    
+    if not filtered_excs:
+        telegram(f"ℹ️ <b>Tidak ada event {cat_label} aktif saat ini.</b>", target_chat_id)
         return
         
-    response_msg = "📖 <b>DATA DIGITAL PHOTOBOOK (VIDEO CALL)</b>\n\n"
+    response_msg = f"🃏 <b>DATA {cat_label}</b>\n"
+    if query:
+        response_msg += f"🔍 Pencarian member: \"{query}\"\n"
+    response_msg += "\n"
+    
     current_time = wib()
     found_any = False
     
-    for e in vc_excs:
+    for e in filtered_excs:
         code = e["code"]
-        title = e.get("title", "Digital Photobook")
+        title = e.get("title", cat_label)
         
         sessions = fetch_exclusive_details(code)
         if not sessions:
@@ -311,6 +367,8 @@ def handle_vc_command(target_chat_id):
                 
             label = s.get("label", "?")
             stime = s.get("start_time", "")[:5]
+            s_date = s.get("date", "")[:10]
+            s_date_formatted = format_date_str(s_date)
             
             member_lines = []
             for m in s.get("session_members", []):
@@ -319,6 +377,10 @@ def handle_vc_command(target_chat_id):
                 quota = m.get("quota", 0)
                 price = m.get("price", 0)
                 
+                # Check member query filter
+                if query and not matches_member_query(name, query):
+                    continue
+                    
                 if WATCH_MEMBERS and name not in WATCH_MEMBERS:
                     continue
                     
@@ -328,17 +390,17 @@ def handle_vc_command(target_chat_id):
             if member_lines:
                 event_has_sessions = True
                 found_any = True
-                event_msg += f"📋 {label} ({stime} WIB):\n" + "\n".join(member_lines) + "\n\n"
+                event_msg += f"📅 {s_date_formatted} | 📋 {label} ({stime} WIB):\n" + "\n".join(member_lines) + "\n\n"
                 
         if event_has_sessions:
             response_msg += event_msg
             
     if not found_any:
-        telegram("ℹ️ <b>Tidak ada data sesi mendatang untuk Digital Photobook yang cocok.</b>", target_chat_id)
+        telegram(f"ℹ️ <b>Tidak ada sesi mendatang untuk {cat_label} yang cocok dengan pencarian Anda.</b>", target_chat_id)
     else:
         send_long_telegram_message(target_chat_id, response_msg)
 
-def handle_show_command(target_chat_id):
+def handle_show_command(target_chat_id, query):
     global active_shows
     
     with cache_lock:
@@ -366,7 +428,12 @@ def handle_show_command(target_chat_id):
     # Sort shows by date
     future_shows.sort(key=lambda x: x[1] if x[1] else datetime.max.replace(tzinfo=timezone(timedelta(hours=7))))
     
-    response_msg = "🎭 <b>JADWAL THEATER SHOW MENDATANG</b>\n\n"
+    response_msg = "🎭 <b>JADWAL THEATER SHOW MENDATANG</b>\n"
+    if query:
+        response_msg += f"🔍 Pencarian show: \"{query}\"\n"
+    response_msg += "\n"
+    
+    found_any = False
     
     for s, show_dt in future_shows:
         sid = s["schedule_id"]
@@ -376,6 +443,16 @@ def handle_show_command(target_chat_id):
         team = s.get("jkt48_member_type") or "TBA"
         birthday = s.get("birthday_member")
         
+        # Match query with title or team or birthday member
+        if query:
+            q_lower = query.lower().strip()
+            title_lower = title.lower()
+            team_lower = team.lower()
+            birthday_lower = (birthday or "").lower()
+            if q_lower not in title_lower and q_lower not in team_lower and q_lower not in birthday_lower:
+                continue
+                
+        found_any = True
         show_info = f"<b>{title}</b>\n"
         show_info += f"📅 {date_str} ({stime} WIB)\n"
         show_info += f"👥 Cast/Team: {team}\n"
@@ -403,7 +480,10 @@ def handle_show_command(target_chat_id):
         
         response_msg += show_info
         
-    send_long_telegram_message(target_chat_id, response_msg)
+    if not found_any:
+        telegram("ℹ️ <b>Tidak ada jadwal Theater Show yang cocok dengan pencarian Anda.</b>", target_chat_id)
+    else:
+        send_long_telegram_message(target_chat_id, response_msg)
 
 # Telegram Updates Poller (Runs in background thread)
 def poll_telegram_updates():
@@ -439,15 +519,26 @@ def poll_telegram_updates():
                     if chat_id != str(CHAT_ID):
                         continue
                         
-                    text = message.get("text", "").strip().lower()
+                    text = message.get("text", "").strip()
                     if not text:
                         continue
                         
-                    print(f"🤖 Telegram menerima command: '{text}' dari {chat_id}")
-                    if text in ["vc", "/vc"]:
-                        handle_vc_command(chat_id)
-                    elif text in ["show", "/show"]:
-                        handle_show_command(chat_id)
+                    # Split command and query parameter
+                    parts = text.split(maxsplit=1)
+                    cmd = parts[0].lower()
+                    query = parts[1] if len(parts) > 1 else ""
+                    
+                    print(f"🤖 Telegram menerima command: '{cmd}' | Query: '{query}' | Dari {chat_id}")
+                    if cmd in ["vc", "/vc"]:
+                        handle_exclusive_by_category(chat_id, "DIGITAL_PHOTOBOOK", query)
+                    elif cmd in ["pb", "/pb", "photobook", "/photobook"]:
+                        handle_exclusive_by_category(chat_id, "DIGITAL_PHOTOBOOK", query)
+                    elif cmd in ["pc", "/pc", "photocard", "/photocard"]:
+                        handle_exclusive_by_category(chat_id, "PHOTOCARD", query)
+                    elif cmd in ["2s", "/2s", "2shot", "/2shot"]:
+                        handle_exclusive_by_category(chat_id, "TWO_SHOT", query)
+                    elif cmd in ["show", "/show"]:
+                        handle_show_command(chat_id, query)
                         
         except Exception as e:
             print(f"🤖 [Warning] Poller Telegram mengalami error: {e}")
@@ -510,7 +601,7 @@ def main():
         f"🚀 <b>JKT48 Monitor Aktif!</b>\n"
         f"Memantau exclusives & theater show\n"
         f"Cek setiap: <b>{INTERVAL}s</b>\n"
-        f"Interactive mode aktif (vc / show)\n"
+        f"Interactive mode aktif (vc / pc / 2s / show)\n"
         f"Waktu mulai: 🕐 {wib_str()}"
     )
     
@@ -616,11 +707,13 @@ def main():
                     selisih = prev - quota
                     if selisih > 0:
                         icon = "🔴" if quota == 0 else ("🟡" if quota / (quota + selisih) < 0.3 else "🟢")
-                        print(f"\n  🛒 EXCLUSIVE TERBELI: {name} | {category} | {exc_title[:30]} | {label} ({stime}) | -{selisih} -> sisa {quota}")
+                        s_date = s.get("date", "")[:10]
+                        s_date_formatted = format_date_str(s_date)
+                        print(f"\n  🛒 EXCLUSIVE TERBELI: {name} | {category} | {exc_title[:30]} | {s_date_formatted} | {label} ({stime}) | -{selisih} -> sisa {quota}")
                         telegram(
                             f"🛒 <b>TIKET EXCLUSIVE TERBELI!</b>\n\n"
                             f"ℹ️ <b>[{category}]</b> {exc_title}\n"
-                            f"👤 <b>{name}</b> | 📋 {label} ({stime} WIB)\n"
+                            f"👤 <b>{name}</b> | 📅 {s_date_formatted} | 📋 {label} ({stime} WIB)\n"
                             f"🚪 {jalur} | 💰 Rp{price:,}\n"
                             f"📉 {prev} → {quota} <i>(-{selisih})</i> | {icon} Sisa: {quota}"
                             + (" <i>(SOLD OUT!)</i>" if quota == 0 else "") +
@@ -629,11 +722,13 @@ def main():
                         notif_count += 1
                     elif quota > prev:
                         icon = "🟢"
-                        print(f"\n  ♻️ EXCLUSIVE BERTAMBAH: {name} | {category} | {exc_title[:30]} | {label} ({stime}) | +{quota - prev} -> sisa {quota}")
+                        s_date = s.get("date", "")[:10]
+                        s_date_formatted = format_date_str(s_date)
+                        print(f"\n  ♻️ EXCLUSIVE BERTAMBAH: {name} | {category} | {exc_title[:30]} | {s_date_formatted} | {label} ({stime}) | +{quota - prev} -> sisa {quota}")
                         telegram(
                             f"♻️ <b>TIKET EXCLUSIVE BERTAMBAH (RESTOCK)!</b>\n\n"
                             f"ℹ️ <b>[{category}]</b> {exc_title}\n"
-                            f"👤 <b>{name}</b> | 📋 {label} ({stime} WIB)\n"
+                            f"👤 <b>{name}</b> | 📅 {s_date_formatted} | 📋 {label} ({stime} WIB)\n"
                             f"🚪 {jalur} | 💰 Rp{price:,}\n"
                             f"📈 {prev} → {quota} <i>(+{quota - prev})</i> | {icon} Sisa: {quota}"
                             f"\n🕐 {wib_str()}\n🔗 <a href='{purchase_url}'>Lihat tiket →</a>"
