@@ -29,7 +29,7 @@ if sys.platform.startswith("win"):
 # Configurations from Environment Variables
 BOT_TOKEN      = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 CHAT_ID        = os.environ.get("TELEGRAM_CHAT_ID", "")
-INTERVAL       = int(os.environ.get("MONITOR_INTERVAL", "30"))
+INTERVAL       = int(os.environ.get("MONITOR_INTERVAL", "5"))
 HEARTBEAT_H    = int(os.environ.get("HEARTBEAT_HOURS", "6"))
 MAX_FAIL       = 5
 WATCH_MEMBERS  = [] # Add member names here to filter exclusives if desired
