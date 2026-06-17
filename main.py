@@ -427,6 +427,188 @@ def handle_show_command(target_chat_id, query):
     else:
         send_long_telegram_message(target_chat_id, response_msg)
 
+def get_exclusive_sessions(code):
+    global exc_details
+    with cache_lock:
+        sessions = exc_details.get(code)
+    if not sessions:
+        sessions = fetch_exclusive_details(code)
+    return sessions or []
+
+def get_member_exclusives(category, query):
+    global active_exclusives
+    with cache_lock:
+        excs = list(active_exclusives)
+    if not excs:
+        excs = fetch_exclusives_list()
+        
+    filtered_excs = [e for e in excs if e.get("category") == category]
+    
+    current_time = wib()
+    results = []
+    
+    for e in filtered_excs:
+        code = e["code"]
+        title = e.get("title", category)
+        
+        sessions = get_exclusive_sessions(code)
+        
+        for s in sessions:
+            try:
+                s_time = s.get("end_time") or s.get("start_time") or "23:59:59"
+                session_dt = parse_wib_datetime(s["date"], s_time)
+                if session_dt < current_time:
+                    continue
+            except Exception:
+                pass
+                
+            label = s.get("label", "?")
+            stime = s.get("start_time", "")[:5]
+            s_date = s.get("date", "")[:10]
+            s_date_formatted = format_date_str(s_date)
+            
+            for m in s.get("session_members", []):
+                name = m.get("member_name", "")
+                jalur = m.get("label", "")
+                quota = m.get("quota", 0)
+                price = m.get("price", 0)
+                
+                if matches_member_query(name, query):
+                    icon = "🔴" if quota == 0 else "🟢"
+                    results.append({
+                        "title": title,
+                        "date": s_date_formatted,
+                        "label": label,
+                        "stime": stime,
+                        "jalur": jalur,
+                        "quota": quota,
+                        "price": price,
+                        "icon": icon
+                    })
+    return results
+
+def get_member_shows(query):
+    global active_shows, show_details
+    with cache_lock:
+        shows = list(active_shows)
+        
+    current_time = wib()
+    results = []
+    
+    for s in shows:
+        try:
+            t_str = s.get("end_time") or s.get("start_time") or "23:59:59"
+            show_dt = parse_wib_datetime(s["date"], t_str)
+            if show_dt < current_time:
+                continue
+        except Exception:
+            pass
+            
+        sid = s["schedule_id"]
+        ref_code = s.get("reference_code", "")
+        title = s.get("title", "Show Theater")
+        date_str = s.get("date", "")[:10]
+        stime = s.get("start_time", "")[:5]
+        team = s.get("jkt48_member_type") or "TBA"
+        birthday = s.get("birthday_member")
+        
+        with cache_lock:
+            details = show_details.get(ref_code)
+            
+        if not details and ref_code:
+            details = fetch_theater_show_details(ref_code)
+            
+        members = []
+        if details:
+            members = [m.get("name", "") for m in details.get("jkt48_member", []) if m.get("name")]
+            
+        members_str = ", ".join(members) if members else "Belum diumumkan"
+        
+        matches_member = False
+        q_lower = query.lower().strip()
+        members_lower = members_str.lower()
+        
+        for target in MEMBER_NICKNAMES.get(q_lower, [q_lower]):
+            if target in members_lower:
+                matches_member = True
+                break
+                
+        if matches_member:
+            purchase_url = f"https://jkt48.com/theater/schedule/id/{sid}?lang=id"
+            results.append({
+                "title": title,
+                "date": format_date_str(date_str),
+                "stime": stime,
+                "team": team,
+                "birthday": birthday,
+                "members_str": members_str,
+                "purchase_url": purchase_url
+            })
+    return results
+
+def handle_full_data_command(target_chat_id, query):
+    if not query:
+        telegram("ℹ️ <b>Format salah. Contoh penggunaan:</b> <code>full data nala</code> atau <code>full data Levi</code>", target_chat_id)
+        return
+        
+    q_lower = query.lower().strip()
+    official_names = MEMBER_NICKNAMES.get(q_lower, [])
+    resolved_name = official_names[0].title() if official_names else query.title()
+    
+    vcs = get_member_exclusives("DIGITAL_PHOTOBOOK", query)
+    pcs = get_member_exclusives("PHOTOCARD", query)
+    tss = get_member_exclusives("TWO_SHOT", query)
+    shows = get_member_shows(query)
+    
+    if not vcs and not pcs and not tss and not shows:
+        telegram(f"ℹ️ <b>Tidak ada data event mendatang untuk member: \"{resolved_name}\"</b>", target_chat_id)
+        return
+        
+    msg = f"🌟 <b>FULL DATA: {resolved_name.upper()}</b> 🌟\n\n"
+    
+    # 1. Video Call (DIGITAL_PHOTOBOOK)
+    msg += "📹 <b>DIGITAL PHOTOBOOK (VIDEO CALL)</b>\n"
+    if vcs:
+        for v in vcs:
+            msg += f"• <b>{v['title']}</b>\n  📅 {v['date']} | 📋 {v['label']} ({v['stime']} WIB)\n  🚪 {v['jalur']} | {v['icon']} Sisa: {v['quota']} | Rp{v['price']:,}\n"
+    else:
+        msg += "<i>Tidak ada sesi video call mendatang.</i>\n"
+    msg += "\n"
+    
+    # 2. Meet & Greet (PHOTOCARD)
+    msg += "🤝 <b>PHOTOCARD (MEET & GREET)</b>\n"
+    if pcs:
+        for p in pcs:
+            msg += f"• <b>{p['title']}</b>\n  📅 {p['date']} | 📋 {p['label']} ({p['stime']} WIB)\n  🚪 {p['jalur']} | {p['icon']} Sisa: {p['quota']} | Rp{p['price']:,}\n"
+    else:
+        msg += "<i>Tidak ada sesi meet & greet mendatang.</i>\n"
+    msg += "\n"
+    
+    # 3. Two Shot
+    msg += "📸 <b>TWO SHOT (2S)</b>\n"
+    if tss:
+        for t in tss:
+            msg += f"• <b>{t['title']}</b>\n  📅 {t['date']} | 📋 {t['label']} ({t['stime']} WIB)\n  🚪 {t['jalur']} | {t['icon']} Sisa: {t['quota']} | Rp{t['price']:,}\n"
+    else:
+        msg += "<i>Tidak ada sesi two shot mendatang.</i>\n"
+    msg += "\n"
+    
+    # 4. Theater Shows
+    msg += "🎭 <b>THEATER SHOWS</b>\n"
+    if shows:
+        for s in shows:
+            msg += f"• <b>{s['title']}</b>\n  📅 {s['date']} ({s['stime']} WIB) | Cast: {s['team']}\n"
+            if s['birthday']:
+                msg += f"  🎂 Birthday: {s['birthday']}\n"
+            msg += f"  🔗 <a href='{s['purchase_url']}'>Beli Tiket →</a>\n"
+    else:
+        msg += "<i>Tidak ada jadwal teater mendatang.</i>\n"
+    msg += "\n"
+    
+    msg += f"🕐 <i>Data per: {wib_str()}</i>"
+    
+    send_long_telegram_message(target_chat_id, msg)
+
 # Telegram Updates Poller (Runs in background thread)
 def poll_telegram_updates():
     offset = None
@@ -465,22 +647,49 @@ def poll_telegram_updates():
                     if not text:
                         continue
                         
-                    # Split command and query parameter
-                    parts = text.split(maxsplit=1)
-                    cmd = parts[0].lower()
-                    query = parts[1] if len(parts) > 1 else ""
+                    # Helper to strip slash
+                    clean_text = text
+                    if clean_text.startswith("/"):
+                        clean_text = clean_text[1:]
+                    clean_text_lower = clean_text.lower().strip()
                     
-                    print(f"🤖 Telegram menerima command: '{cmd}' | Query: '{query}' | Dari {chat_id}")
-                    if cmd in ["vc", "/vc"]:
-                        handle_exclusive_by_category(chat_id, "DIGITAL_PHOTOBOOK", query)
-                    elif cmd in ["pb", "/pb", "photobook", "/photobook"]:
-                        handle_exclusive_by_category(chat_id, "DIGITAL_PHOTOBOOK", query)
-                    elif cmd in ["pc", "/pc", "photocard", "/photocard"]:
+                    print(f"🤖 Telegram menerima pesan: '{text}' | Dari {chat_id}")
+                    
+                    # Match commands
+                    if clean_text_lower.startswith("full data"):
+                        query = clean_text[9:].strip()
+                        handle_full_data_command(chat_id, query)
+                    elif clean_text_lower.startswith("meet and greet"):
+                        query = clean_text[14:].strip()
                         handle_exclusive_by_category(chat_id, "PHOTOCARD", query)
-                    elif cmd in ["2s", "/2s", "2shot", "/2shot"]:
+                    elif clean_text_lower.startswith("meet & greet"):
+                        query = clean_text[12:].strip()
+                        handle_exclusive_by_category(chat_id, "PHOTOCARD", query)
+                    elif clean_text_lower.startswith("two shot"):
+                        query = clean_text[8:].strip()
                         handle_exclusive_by_category(chat_id, "TWO_SHOT", query)
-                    elif cmd in ["show", "/show"]:
-                        handle_show_command(chat_id, query)
+                    elif clean_text_lower.startswith("2 shot"):
+                        query = clean_text[6:].strip()
+                        handle_exclusive_by_category(chat_id, "TWO_SHOT", query)
+                    elif clean_text_lower.startswith("video call"):
+                        query = clean_text[10:].strip()
+                        handle_exclusive_by_category(chat_id, "DIGITAL_PHOTOBOOK", query)
+                    elif clean_text_lower.startswith("digital photobook"):
+                        query = clean_text[17:].strip()
+                        handle_exclusive_by_category(chat_id, "DIGITAL_PHOTOBOOK", query)
+                    else:
+                        parts = clean_text.split(maxsplit=1)
+                        cmd = parts[0].lower()
+                        query = parts[1] if len(parts) > 1 else ""
+                        
+                        if cmd in ["vc", "pb", "photobook", "videocall"]:
+                            handle_exclusive_by_category(chat_id, "DIGITAL_PHOTOBOOK", query)
+                        elif cmd in ["pc", "mng", "photocard", "meetandgreet"]:
+                            handle_exclusive_by_category(chat_id, "PHOTOCARD", query)
+                        elif cmd in ["2s", "2shot", "twoshot"]:
+                            handle_exclusive_by_category(chat_id, "TWO_SHOT", query)
+                        elif cmd in ["show"]:
+                            handle_show_command(chat_id, query)
                         
         except Exception as e:
             print(f"🤖 [Warning] Poller Telegram mengalami error: {e}")
