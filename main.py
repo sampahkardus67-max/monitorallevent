@@ -141,7 +141,13 @@ def fetch_json(url: str, retries: int = 2) -> dict | list | None:
 # ─────────────────────────────────────────────
 
 def fetch_exclusive_list() -> list:
-    """Ambil daftar exclusive yang akan datang dan kategorinya sesuai filter."""
+    """
+    Ambil daftar exclusive dari API.
+    Filter hanya kategori yang dipantau.
+    Tidak filter tanggal di sini karena valid_date_from adalah
+    tanggal mulai penjualan, bukan tanggal event.
+    Event bisa masih aktif meski valid_date_from sudah lewat.
+    """
     data = fetch_json(EXCLUSIVE_LIST)
     if not data or not data.get("status"):
         return []
@@ -149,8 +155,6 @@ def fetch_exclusive_list() -> list:
     for e in data.get("data", []):
         cat = e.get("category", "")
         if cat not in WATCH_CATEGORIES:
-            continue
-        if not is_future(e.get("valid_date_from", "")):
             continue
         result.append(e)
     return result
@@ -285,11 +289,15 @@ def init():
 
     # Ambil daftar exclusive
     exclusive_list = []
-    while not exclusive_list:
+    for attempt in range(5):
         exclusive_list = fetch_exclusive_list()
-        if not exclusive_list:
-            print("  ⚠ Exclusive API belum merespons, retry 5s...")
-            time.sleep(5)
+        if exclusive_list is not None:
+            break
+        print(f"  ⚠ Exclusive API gagal (attempt {attempt+1}/5), retry 5s...")
+        time.sleep(5)
+    if not exclusive_list:
+        print("  ⚠ Tidak ada exclusive yang ditemukan, lanjut tanpa exclusive...")
+        exclusive_list = []
 
     # Ambil quota awal tiap exclusive
     ex_quotas = {}
