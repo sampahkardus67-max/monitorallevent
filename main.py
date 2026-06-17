@@ -483,7 +483,8 @@ def get_member_exclusives(category, query):
                         "jalur": jalur,
                         "quota": quota,
                         "price": price,
-                        "icon": icon
+                        "icon": icon,
+                        "code": code
                     })
     return results
 
@@ -570,7 +571,8 @@ def handle_full_data_command(target_chat_id, query):
     msg += "📹 <b>DIGITAL PHOTOBOOK (VIDEO CALL)</b>\n"
     if vcs:
         for v in vcs:
-            msg += f"• <b>{v['title']}</b>\n  📅 {v['date']} | 📋 {v['label']} ({v['stime']} WIB)\n  🚪 {v['jalur']} | {v['icon']} Sisa: {v['quota']} | Rp{v['price']:,}\n"
+            p_url = f"https://jkt48.com/purchase/exclusive?code={v['code']}"
+            msg += f"• <b>{v['title']}</b>\n  📅 {v['date']} | 📋 {v['label']} ({v['stime']} WIB)\n  🚪 {v['jalur']} | {v['icon']} Sisa: {v['quota']} | Rp{v['price']:,}\n  🔗 <a href='{p_url}'>Beli Tiket →</a>\n"
     else:
         msg += "<i>Tidak ada sesi video call mendatang.</i>\n"
     msg += "\n"
@@ -579,7 +581,8 @@ def handle_full_data_command(target_chat_id, query):
     msg += "🤝 <b>PHOTOCARD (MEET & GREET)</b>\n"
     if pcs:
         for p in pcs:
-            msg += f"• <b>{p['title']}</b>\n  📅 {p['date']} | 📋 {p['label']} ({p['stime']} WIB)\n  🚪 {p['jalur']} | {p['icon']} Sisa: {p['quota']} | Rp{p['price']:,}\n"
+            p_url = f"https://jkt48.com/purchase/exclusive?code={p['code']}"
+            msg += f"• <b>{p['title']}</b>\n  📅 {p['date']} | 📋 {p['label']} ({p['stime']} WIB)\n  🚪 {p['jalur']} | {p['icon']} Sisa: {p['quota']} | Rp{p['price']:,}\n  🔗 <a href='{p_url}'>Beli Tiket →</a>\n"
     else:
         msg += "<i>Tidak ada sesi meet & greet mendatang.</i>\n"
     msg += "\n"
@@ -588,7 +591,8 @@ def handle_full_data_command(target_chat_id, query):
     msg += "📸 <b>TWO SHOT (2S)</b>\n"
     if tss:
         for t in tss:
-            msg += f"• <b>{t['title']}</b>\n  📅 {t['date']} | 📋 {t['label']} ({t['stime']} WIB)\n  🚪 {t['jalur']} | {t['icon']} Sisa: {t['quota']} | Rp{t['price']:,}\n"
+            p_url = f"https://jkt48.com/purchase/exclusive?code={t['code']}"
+            msg += f"• <b>{t['title']}</b>\n  📅 {t['date']} | 📋 {t['label']} ({t['stime']} WIB)\n  🚪 {t['jalur']} | {t['icon']} Sisa: {t['quota']} | Rp{t['price']:,}\n  🔗 <a href='{p_url}'>Beli Tiket →</a>\n"
     else:
         msg += "<i>Tidak ada sesi two shot mendatang.</i>\n"
     msg += "\n"
