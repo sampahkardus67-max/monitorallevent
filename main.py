@@ -3,14 +3,14 @@
 JKT48 Ticket & Show Monitor with Telegram Interactive Commands & Member Query Filtering
 Monitors:
 1. Exclusives (PHOTOCARD, TWO_SHOT, DIGITAL_PHOTOBOOK) - Purchases & Restocks
-2. Shows (type=SHOW) - Available/Sold Ticket Count & Purchases
+2. Shows (type=SHOW) - Performing Members Announcement Alerts
 
 Interactive Commands (only responds to configured CHAT_ID):
 - "vc [query]" / "/vc [query]": Returns Digital Photobook (video call) data.
 - "pc [query]" / "/pc [query]" / "photocard [query]": Returns Photocard data.
 - "2s [query]" / "/2s [query]" / "2shot [query]": Returns Two Shot data.
 - "pb [query]" / "/pb [query]" / "photobook [query]": Returns Digital Photobook data.
-- "show [query]" / "/show [query]": Returns theater show details and ticket availability (filtered by show title/team).
+- "show [query]" / "/show [query]": Returns theater show details and performing member names (filtered by show title, team, or member name).
 """
 
 import os
@@ -33,7 +33,7 @@ if sys.platform.startswith("win"):
 BOT_TOKEN      = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 CHAT_ID        = os.environ.get("TELEGRAM_CHAT_ID", "")
 INTERVAL       = int(os.environ.get("MONITOR_INTERVAL", "5"))
-HEARTBEAT_H    = int(os.environ.get("HEBEAT_HOURS", "6"))
+HEARTBEAT_H    = int(os.environ.get("HEARTBEAT_HOURS", "6"))
 MAX_FAIL       = 5
 WATCH_MEMBERS  = [] # Add member names here to filter exclusives if desired
 
@@ -216,104 +216,37 @@ def fetch_exclusive_details(code):
         pass
     return None
 
-# Fetch Single Show Ticket Details
-def fetch_show_ticket_details(schedule_id):
-    url = f"https://jkt48.com/api/v1/schedules/ticket?schedule_id={schedule_id}&lang=id"
+# Fetch Theater Show Details (Performing members)
+def fetch_theater_show_details(reference_code):
+    url = f"https://jkt48.com/api/v1/theater-shows/{reference_code}?lang=id"
     try:
         r = requests.get(url, headers=HEADERS, timeout=15)
         r.raise_for_status()
         data = r.json()
-        if data.get("status") and "data" in data and data["data"]:
+        if data.get("status") and "data" in data:
             return data["data"]
     except Exception:
         pass
-        
-    url = f"https://jkt48.com/api/v1/schedules/ticket-info?schedule_id={schedule_id}&lang=id"
-    try:
-        r = requests.get(url, headers=HEADERS, timeout=15)
-        r.raise_for_status()
-        data = r.json()
-        if data.get("status") and "data" in data and data["data"]:
-            return data["data"]
-    except Exception:
-        pass
-        
     return None
 
-# Parsers
-def parse_show_tickets(data):
-    tickets = []
-    if not data:
-        return tickets
-        
-    if isinstance(data, dict):
-        for key in ['tickets', 'ticket', 'data', 'details']:
-            if key in data and isinstance(data[key], (list, dict)):
-                data = data[key]
-                break
-                
-    if isinstance(data, list):
-        for item in data:
-            if isinstance(item, dict):
-                name = item.get("name") or item.get("label") or item.get("ticket_type") or item.get("type") or "Ticket"
-                price = item.get("price") or 0
-                avail = item.get("available") or item.get("quota") or item.get("tickets_available") or 0
-                sold = item.get("tickets_sold") or item.get("sold") or 0
-                tid = str(item.get("ticket_type_id") or item.get("id") or name)
-                tickets.append({
-                    "id": tid,
-                    "name": name,
-                    "price": price,
-                    "available": int(avail),
-                    "sold": int(sold),
-                    "total": int(avail) + int(sold)
-                })
-    elif isinstance(data, dict):
-        name = data.get("name") or "Ticket"
-        price = data.get("price") or 0
-        avail = data.get("available") or data.get("quota") or data.get("tickets_available") or 0
-        sold = data.get("tickets_sold") or data.get("sold") or 0
-        tid = str(data.get("ticket_type_id") or data.get("id") or name)
-        tickets.append({
-            "id": tid,
-            "name": name,
-            "price": price,
-            "available": int(avail),
-            "sold": int(sold),
-            "total": int(avail) + int(sold)
-        })
-    return tickets
-
-# Concurrently fetch details of active exclusives and shows
-def fetch_all_active_data(exclusives, shows):
+# Concurrently fetch details of active exclusives
+def fetch_all_active_data(exclusives):
     exc_results = {}
-    show_results = {}
     
     def fetch_exc(exc):
         code = exc["code"]
         res = fetch_exclusive_details(code)
         return code, res
 
-    def fetch_show(s):
-        sid = s["schedule_id"]
-        res = fetch_show_ticket_details(sid)
-        return sid, res
-
-    with ThreadPoolExecutor(max_workers=8) as executor:
+    with ThreadPoolExecutor(max_workers=5) as executor:
         exc_futures = [executor.submit(fetch_exc, e) for e in exclusives]
-        show_futures = [executor.submit(fetch_show, s) for s in shows]
         
         for f in exc_futures:
             code, res = f.result()
             if res is not None:
                 exc_results[code] = res
                 
-        for f in show_futures:
-            sid, res = f.result()
-            if res is not None:
-                show_results[sid] = res
-                
-    return exc_results, show_results
+    return exc_results
 
 # Interactive Telegram Commands Handlers
 def handle_exclusive_by_category(target_chat_id, category, query):
@@ -401,13 +334,10 @@ def handle_exclusive_by_category(target_chat_id, category, query):
         send_long_telegram_message(target_chat_id, response_msg)
 
 def handle_show_command(target_chat_id, query):
-    global active_shows
+    global active_shows, show_details
     
     with cache_lock:
         shows = list(active_shows)
-        
-    if not shows:
-        shows = fetch_shows_list()
         
     current_time = wib()
     future_shows = []
@@ -437,44 +367,56 @@ def handle_show_command(target_chat_id, query):
     
     for s, show_dt in future_shows:
         sid = s["schedule_id"]
+        ref_code = s.get("reference_code", "")
         title = s.get("title", "Show Theater")
         date_str = s.get("date", "")[:10]
         stime = s.get("start_time", "")[:5]
         team = s.get("jkt48_member_type") or "TBA"
         birthday = s.get("birthday_member")
         
-        # Match query with title or team or birthday member
+        # Fetch detailed info (either from global cache or fetch fresh)
+        with cache_lock:
+            details = show_details.get(ref_code)
+            
+        if not details and ref_code:
+            details = fetch_theater_show_details(ref_code)
+            
+        members_str = "Belum diumumkan"
+        members = []
+        if details:
+            members = [m.get("name", "") for m in details.get("jkt48_member", []) if m.get("name")]
+            if members:
+                members_str = ", ".join(members)
+                
+        # Match query with title, team, birthday, or performing member names
         if query:
             q_lower = query.lower().strip()
             title_lower = title.lower()
             team_lower = team.lower()
             birthday_lower = (birthday or "").lower()
-            if q_lower not in title_lower and q_lower not in team_lower and q_lower not in birthday_lower:
+            members_lower = members_str.lower()
+            
+            # Check nickname mappings for show member search as well
+            matches_member = False
+            for target in MEMBER_NICKNAMES.get(q_lower, [q_lower]):
+                if target in members_lower:
+                    matches_member = True
+                    break
+            
+            if (q_lower not in title_lower and 
+                q_lower not in team_lower and 
+                q_lower not in birthday_lower and 
+                not matches_member):
                 continue
                 
         found_any = True
         show_info = f"<b>{title}</b>\n"
-        show_info += f"📅 {date_str} ({stime} WIB)\n"
+        show_info += f"📅 {format_date_str(date_str)} ({stime} WIB)\n"
         show_info += f"👥 Cast/Team: {team}\n"
         if birthday:
             show_info += f"🎂 Birthday Show: {birthday}\n"
-            
-        raw_tickets = fetch_show_ticket_details(sid)
-        tickets = parse_show_tickets(raw_tickets)
+        show_info += f"👥 Member Tampil:\n<i>{members_str}</i>\n"
         
-        if tickets:
-            t_lines = []
-            for t in tickets:
-                tname = t["name"]
-                price = t["price"]
-                avail = t["available"]
-                sold = t["sold"]
-                icon = "🔴" if avail == 0 else "🟢"
-                t_lines.append(f"  └─ {tname}: {icon} Sisa {avail} | Terjual: {sold} (Rp{price:,})")
-            show_info += "\n".join(t_lines) + "\n"
-        else:
-            show_info += "  ⚠️ <i>Detail tiket tidak tersedia atau API error</i>\n"
-            
         purchase_url = f"https://jkt48.com/theater/schedule/id/{sid}?lang=id"
         show_info += f"🔗 <a href='{purchase_url}'>Beli Tiket →</a>\n\n"
         
@@ -563,7 +505,7 @@ def heartbeat(active_excs, active_shs, exc_dets, show_dets, run_count, last_hb):
                     
     # Stats for shows
     show_total = len(active_shs)
-    show_with_tickets = len(show_dets)
+    show_with_members = sum(1 for d in show_dets.values() if d and d.get("jkt48_member"))
     
     msg = (
         f"💓 <b>Laporan Berkala JKT48 Monitor</b>\n\n"
@@ -572,7 +514,7 @@ def heartbeat(active_excs, active_shs, exc_dets, show_dets, run_count, last_hb):
         f"🃏 <b>Exclusives Monitored:</b> {len(active_excs)}\n"
         f"└─ Total Slots: {exc_total_slots} | Tersedia: {exc_avail_slots}\n\n"
         f"🎭 <b>Theater Shows Monitored:</b> {show_total}\n"
-        f"└─ Dengan Data Tiket: {show_with_tickets}\n\n"
+        f"└─ Dengan Member Diumumkan: {show_with_members}\n\n"
         f"⏰ Heartbeat berikutnya: {(now + timedelta(hours=HEARTBEAT_H)).strftime('%H:%M WIB')}"
     )
     telegram(msg)
@@ -591,6 +533,7 @@ def main():
     # Cache management variables
     last_list_fetch = 0
     prev_quota = {}
+    prev_show_members = {} # Tracks: reference_code -> list of member names
     is_first_run = True
     
     run_count = 0
@@ -634,7 +577,7 @@ def main():
             last_list_fetch = now_ts
             print(f"   Cache diperbarui: {len(active_exclusives)} exclusives | {len(active_shows)} shows aktif mendatang")
             
-        # 2. Poll detailed ticket data in parallel
+        # 2. Poll detailed data
         run_count += 1
         print(f"[{wib().strftime('%H:%M:%S')}] Cek #{run_count}...", end=" ", flush=True)
         
@@ -642,15 +585,44 @@ def main():
             excs_snapshot = list(active_exclusives)
             shows_snapshot = list(active_shows)
             
-        exc_dets, show_dets = fetch_all_active_data(excs_snapshot, shows_snapshot)
+        exc_dets = fetch_all_active_data(excs_snapshot)
         
+        # Poll show details (only for unannounced shows to save API bandwidth)
+        show_dets = {}
+        shows_api_errors = 0
+        shows_ok = 0
+        
+        for s in shows_snapshot:
+            ref_code = s.get("reference_code", "")
+            if not ref_code:
+                continue
+                
+            # If already announced and cached, reuse it
+            if ref_code in prev_show_members and prev_show_members[ref_code]:
+                show_dets[ref_code] = {
+                    "jkt48_member": [{"name": name} for name in prev_show_members[ref_code]]
+                }
+                shows_ok += 1
+                continue
+                
+            # Otherwise fetch (polite 0.2s delay on first run)
+            if is_first_run:
+                time.sleep(0.2)
+                
+            details = fetch_theater_show_details(ref_code)
+            if details is not None:
+                show_dets[ref_code] = details
+                shows_ok += 1
+            else:
+                shows_api_errors += 1
+                
         # Share details with global cache
         with cache_lock:
             exc_details = exc_dets
             show_details = show_dets
             
-        # Check if BOTH failed entirely
-        if not exc_dets and not show_dets and len(excs_snapshot) + len(shows_snapshot) > 0:
+        # Check if exclusives poll failed entirely when exclusives are active
+        if not exc_dets and len(excs_snapshot) > 0:
             fail_count += 1
             print(f"gagal ({fail_count}x)")
             if fail_count == MAX_FAIL:
@@ -735,63 +707,57 @@ def main():
                         )
                         notif_count += 1
 
-        # --- PROCESS SHOWS ---
-        shows_api_errors = 0
-        shows_ok = 0
-        
+        # --- PROCESS SHOWS (Member update alerts) ---
         for s in shows_snapshot:
-            sid = s["schedule_id"]
+            ref_code = s.get("reference_code", "")
+            if not ref_code:
+                continue
+                
             title = s.get("title", "Show Theater")
             date_str = s.get("date", "")[:10]
             stime = s.get("start_time", "")[:5]
+            team = s.get("jkt48_member_type") or "TBA"
             
-            purchase_url = f"https://jkt48.com/theater/schedule/id/{sid}?lang=id"
+            purchase_url = f"https://jkt48.com/theater/schedule/id/{s['schedule_id']}?lang=id"
             
-            raw_tickets = show_dets.get(sid)
-            if raw_tickets is None:
-                shows_api_errors += 1
+            details = show_dets.get(ref_code)
+            if details is None:
                 continue
                 
-            shows_ok += 1
-            tickets = parse_show_tickets(raw_tickets)
+            # Extract performing member names
+            members = [m.get("name", "") for m in details.get("jkt48_member", []) if m.get("name")]
             
-            for t in tickets:
-                tid = t["id"]
-                tname = t["name"]
-                price = t["price"]
-                avail = t["available"]
-                sold = t["sold"]
+            if is_first_run:
+                prev_show_members[ref_code] = members
+                continue
                 
-                flat_key = f"show_{sid}_{tid}"
-                new_quota[flat_key] = avail
+            if ref_code in prev_show_members:
+                prev_members = prev_show_members[ref_code]
                 
-                if is_first_run:
-                    continue
-                    
-                prev = prev_quota.get(flat_key)
-                if prev is None:
-                    continue
-                    
-                selisih = prev - avail
-                if selisih > 0:
-                    icon = "🔴" if avail == 0 else ("🟡" if avail / (avail + selisih) < 0.3 else "🟢")
-                    print(f"\n  🛒 TIKET SHOW TERBELI: {title} | {tname} | -{selisih} -> sisa {avail}")
+                # Check if member list transitioned from empty/unannounced to announced
+                if not prev_members and members:
+                    print(f"\n📢 UPDATE MEMBER SHOW: {title} | {len(members)} member diumumkan")
+                    member_list_str = "\n".join(f"• {name}" for name in members)
                     telegram(
-                        f"🛒 <b>TIKET SHOW TERBELI!</b>\n\n"
+                        f"📢 <b>UPDATE MEMBER TAMPIL!</b>\n\n"
                         f"🎭 <b>{title}</b>\n"
-                        f"📅 {date_str} ({stime} WIB) | 🎟️ {tname}\n"
-                        f"💰 Rp{price:,} | Terjual: {sold}\n"
-                        f"📉 {prev} → {avail} <i>(-{selisih})</i> | {icon} Sisa: {avail}"
-                        + (" <i>(SOLD OUT!)</i>" if avail == 0 else "") +
-                        f"\n🕐 {wib_str()}\n🔗 <a href='{purchase_url}'>Lihat tiket →</a>"
+                        f"📅 {format_date_str(date_str)} ({stime} WIB) | 👥 Cast/Team: {team}\n\n"
+                        f"👥 <b>Member Tampil ({len(members)}):</b>\n"
+                        f"{member_list_str}\n\n"
+                        f"🕐 {wib_str()}\n🔗 <a href='{purchase_url}'>Lihat detail show →</a>"
                     )
                     notif_count += 1
+                    
+                # Always track the latest members list
+                prev_show_members[ref_code] = members
+            else:
+                prev_show_members[ref_code] = members
                     
         # Update baseline quota tracker
         if is_first_run:
             prev_quota = new_quota
             is_first_run = False
-            print(f"Data awal diinisialisasi: {len(prev_quota)} slot tiket dipantau.")
+            print(f"Data awal diinisialisasi: {len(prev_quota)} slot exclusives dan {len(prev_show_members)} shows dipantau.")
         else:
             for k, v in new_quota.items():
                 prev_quota[k] = v
